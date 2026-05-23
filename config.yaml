@@ -1,0 +1,86 @@
+# =============================================================================
+# NVT MD workflow — configuration file
+# Edit ONLY this file between runs. All input and run scripts are generated
+# automatically by run_upto_NVT.py based on the values below.
+#
+# Usage:
+#   python run_upto_NVT.py setup            # cluster mode (SLURM)
+#   python run_upto_NVT.py setup --mode local
+#   python run_upto_NVT.py setup --submit   # generate + submit immediately
+# =============================================================================
+
+
+# ---- System -----------------------------------------------------------------
+pdb: MUT_INH_monA.pdb
+use_propka: false
+propka_path: propka3        # only used if use_propka: true
+use_hmr: true               # true -> 4 fs timestep, structure_HMR.parm7
+temperature: 300.0          # K
+
+job_name: INH_MUT
+
+
+# ---- Production length ------------------------------------------------------
+ns_per_chunk: 100           # ns per production chunk
+total_chunks: 5             # total chunks  (100 ns × 5 = 500 ns)
+chunks_per_job: 5           # chunks per SLURM job (= total_chunks for long queues,
+                            # 1 for short queues — jobs then chain automatically)
+
+
+# ---- Execution mode ---------------------------------------------------------
+# cluster : SLURM / sbatch  (generates run_gpu + 04_NVT/nvt_job_N.cmd)
+# local   : single GPU workstation, no scheduler  (generates run_local)
+execution_mode: cluster
+
+amber_home: ""              # local only: path to AMBER install dir
+                            # sources $amber_home/amber.sh on startup
+                            # leave blank if pmemd.cuda is already on PATH
+
+
+# ---- AMBER ------------------------------------------------------------------
+amber:
+  module: apps/amber/24     # module loaded on the cluster
+
+
+# ---- SLURM resources (cluster only) -----------------------------------------
+slurm:
+  master:                   # covers stages 00 -> 03
+    time: "1-00:00:00"
+    ntasks: 1
+    gres: gpu:1
+    partition: gpu
+    account: XXXXXXXXXX
+
+  nvt:                      # each NVT chunk-job
+    time: "5-00:00:00"
+    ntasks: 1
+    gres: gpu:1
+    partition: gpu
+    account: XXXXXXXXXX
+
+
+# ---- Minimization -----------------------------------------------------------
+min:
+  maxcyc: 30000             # maximum steps per minimization cycle
+  ncyc: 500                 # steepest-descent steps before switching to CG
+  cut: 10.0                 # non-bonded cutoff (Å)
+  max_cycles_cap: 100       # safety cap on outer convergence loop
+  convergence_threshold: 3.0e-3   # kcal/mol/Å on RMS gradient
+
+
+# ---- Heating ----------------------------------------------------------------
+heat:
+  ps: 200                   # total heating duration (ps); ramp ends at 80%
+
+
+# ---- Equilibration (per cycle) ----------------------------------------------
+equil:
+  npt_ns: 1.25              # cycles 1-5: restrained NPT (backbone restraints 15→3 kcal/mol/Å²)
+  nvt_ns: 5.0               # cycle 6: unrestrained NVT
+
+
+# ---- Production (per chunk) -------------------------------------------------
+prod:
+  ntpr: 10000               # energy print frequency (steps)
+  ntwx: 50000               # trajectory write frequency (steps)
+  ntwr: 10000               # restart write frequency (steps)

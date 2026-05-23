@@ -1,0 +1,116 @@
+# =============================================================================
+# FEP Gaussian Quadrature — configuration file
+# Edit ONLY this file between runs. All input and SLURM scripts are generated
+# automatically by fep_runner.py based on the values below.
+# =============================================================================
+
+
+# Number of Gauss-Legendre lambda windows.
+# Supported values: any integer >= 3 (common: 5, 9, 12).
+# The GL nodes (lambda values) and integration weights are computed automatically.
+n_lambdas: 9
+
+# Number of independent replicas to run
+replicates: 1
+
+
+# -----------------------------------------------------------------------------
+# AMBER module names on your HPC cluster
+# -----------------------------------------------------------------------------
+amber:
+  # Module loaded for GPU production runs and minimisation
+  cuda_module: amber/24
+
+  # Directory containing libcuda.so.1 when it is not in the default library path
+  # (needed on immutable-OS hosts where the NVIDIA driver lives under /run/host).
+  # Leave empty or omit to skip.
+  cuda_lib_path: /home/carlosrtnt/nvidia-driver-libs 
+
+
+# -----------------------------------------------------------------------------
+# SLURM resource specifications
+# Use the gpu block for minimisation and all production windows.
+# Any key written here is passed directly as #SBATCH --key=value, so you can
+# add options like qos, account, mem, etc. without editing fep_runner.py.
+# -----------------------------------------------------------------------------
+slurm:
+  gpu:
+    time: "24:00:00"
+    ntasks: 1
+    gres: gpu:1
+    partition: partition_name
+
+
+
+# -----------------------------------------------------------------------------
+# Execution commands
+# gpu : command used for minimisation and all production windows.
+# -----------------------------------------------------------------------------
+execution_command:
+  gpu: "srun $AMBERHOME/bin/pmemd.cuda"
+
+# -----------------------------------------------------------------------------
+# Simulation parameters
+# -----------------------------------------------------------------------------
+simulation:
+
+  min:
+    maxcyc: 1000000         # maximum minimisation steps
+    ntpr: 5000              # print frequency
+
+  heating:
+    nstlim: 1000000         # steps (1 ns at dt=0.001)
+    dt: 0.001               # ps
+    ntwx: 10000             # output frequency
+    tempi: 10.0             # initial temperature (K)
+    temp0: 300.0            # final temperature (K)
+
+  equil:
+    nstlim: 1000000         # steps  (1 ns at dt=0.001)
+    dt: 0.001               # ps
+    ntwx: 100000            # trajectory write frequency (frames)
+
+  prod:
+    nstlim: 5000000         # steps  (5 ns at dt=0.001)
+    dt: 0.001               # ps
+    ntwe: 1000              # energy/dV-dL write frequency (steps)
+    ntwx: 10000             # trajectory write frequency (steps)
+
+
+# -----------------------------------------------------------------------------
+# Per-system alchemical masks
+# These differ between the free (unbounded) and bound (bounded) legs.
+# timask1/2 : residue ranges for the disappearing/appearing groups (TIMASK)
+# scmask1/2 : atom ranges for soft-core treatment (SCMASK)
+# resnew    : three-letter code of the appearing residue (used in job names)
+# parameters: topology file name inside <system_name>/setup/
+# coordinates: coordinate file name inside <system_name>/setup/
+# -----------------------------------------------------------------------------
+
+# Name of the top-level directory for this mutation (no spaces)
+
+resnew: LCN
+resold: ACN
+
+systems:
+
+  unbounded:
+    parameters: ligands_solvated.parm7
+    coordinates: ligands_solvated.rst7
+    timask1: "':1-4'"
+    timask2: "':5-8'"
+    scmask1: "'@54-65'"
+    scmask2: "'@121'"
+
+
+  bounded:
+    parameters: complex_solvated.parm7
+    coordinates: complex_solvated.rst7
+    timask1: "':608-611'"
+    timask2: "':612-615'"
+    scmask1: "'@9344-9355'"
+    scmask2: "'@9411'"
+
+
+
+
