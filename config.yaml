@@ -11,26 +11,43 @@
 
 
 # ---- System -----------------------------------------------------------------
-pdb: MUT_INH_monA.pdb
-use_propka: false
-propka_path: propka3        # only used if use_propka: true
+pdb: INH_PROTEIN.pdb
 use_hmr: true               # true -> 4 fs timestep, structure_HMR.parm7
 temperature: 300.0          # K
 
-job_name: INH_MUT
+job_name: INH_PROTEIN
+
+
+# ---- Leap input -------------------------------------------------------------
+# Place all parameter files in 00_prep/ and list them here.
+# leap_structure is generated automatically from these values — do not edit it.
+leap:
+  forcefields:
+    - leaprc.protein.ff14SB
+    - leaprc.water.tip3p
+    - leaprc.gaff
+  lib_files:                # loadoff — one entry per .lib file
+    - INH.lib
+  frcmod_files:             # loadamberparams — one entry per .frcmod file
+    - INH.frcmod
+  ions:                     # addions command argument
+    - "Na+ 0"
+    - "Cl- 0"
+  box_type: TIP3PBOX
+  box_size: 12
 
 
 # ---- Production length ------------------------------------------------------
 ns_per_chunk: 100           # ns per production chunk
 total_chunks: 5             # total chunks  (100 ns × 5 = 500 ns)
-chunks_per_job: 5           # chunks per SLURM job (= total_chunks for long queues,
-                            # 1 for short queues — jobs then chain automatically)
+chunks_per_job: 1           # chunks per SLURM job (1 for 1-day queues — jobs chain
+                            # automatically; = total_chunks for 5-day queues)
 
 
 # ---- Execution mode ---------------------------------------------------------
-# cluster : SLURM / sbatch  (generates run_gpu + 04_NVT/nvt_job_N.cmd)
+# cluster : SLURM / sbatch  (generates run_gpu + 04_NVT/run_NVT_N.cmd)
 # local   : single GPU workstation, no scheduler  (generates run_local)
-execution_mode: cluster
+execution_mode: local
 
 amber_home: ""              # local only: path to AMBER install dir
                             # sources $amber_home/amber.sh on startup

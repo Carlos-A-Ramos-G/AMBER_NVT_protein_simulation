@@ -1,125 +1,236 @@
-# Molecular Mechanics Molecular Dynamics  (MM MD) preparation -> NVT production (stages 00 -> 04)
+# MM MD NVT protein simulation (stages 00 → 04)
 
-This is the first half of a QM/MM string-method PMF workflow.
-However, it can also be used as a standalone protocol for running MM MD production simulations.
-`run_upto_NVT.py` configures and runs stages 00 (preparation) through 04
-(NVT production) for an enzyme + inhibitor system.
+A self-contained protocol for running classical MD NVT production simulations of
+proteins with AMBER. Edit `config.yaml`, run `python run_upto_NVT.py setup`, and
+submit — all input files and job scripts are generated automatically.
 
 Two execution modes are supported:
 
-- **cluster** — generates `run_gpu` and submits it with `sbatch` (SLURM).
-- **local** — generates `run_local` and runs it directly with `bash` (local GPU workstation, no scheduler needed).
+- **cluster** — generates `run_gpu` (SLURM master script) and one NVT chunk job
+  script per SLURM job (`04_NVT/run_NVT_N.cmd`). Chunk jobs chain automatically
+  via `sbatch` so only the first needs to be submitted.
+- **local** — generates `run_local` (master script) and one NVT chunk script per
+  chunk (`04_NVT/run_NVT_N_local.sh`). Scripts chain automatically via `bash`.
 
-Stages 05 -> 08 (QM/MM equilibration, scan, second QM/MM equilibration,
-adaptive string method) are launched separately and will get their own driver.
-
-## What you need
+## Requirements
 
 - AMBER (>= 18, tested with 24):
-  - **cluster**: must be a `module` on your cluster (`amber_module` in config).
-  - **local**: either on PATH, or set `amber_home` to your AMBER install directory
-    (the driver will `source $amber_home/amber.sh`).
-- Python >= 3.8 (standard library only for the driver).
-- `propka` (optional, if you want to predict protonation states):
-      pip install propka
-- A PDB file plus any non-standard residue parameter files
-  (`*.lib`, `*.frcmod`) placed in `00_prep/`.
+  - **cluster**: must be available as a `module` (`amber.module` in `config.yaml`).
+  - **local**: either on PATH, or set `amber_home` to your AMBER install directory.
+- Python >= 3.8 with PyYAML (`pip install pyyaml`).
+- A PDB file plus any non-standard residue parameter files (`*.lib`, `*.frcmod`)
+  placed in `00_prep/`.
 
 ## Quick start — cluster (SLURM)
 
-1. Drop your PDB and parameter files into `00_prep/`.
-2. Edit `00_prep/leap_structure_tmp` to reference your non-standard
-   residue libraries (the `loadpdb` line is rewritten by the driver).
-3. Copy `config.ini.example` -> `config.ini` and set `execution_mode = cluster`,
-   then fill in `account`, `amber_module`, and walltimes.
-4. Render and submit:
+1. Drop your PDB and parameter files (`.lib`, `.frcmod`) into `00_prep/`.
+2. Edit `config.yaml`: set `pdb`, `job_name`, `execution_mode: cluster`,
+   `amber.module`, `slurm.master.account`, `slurm.nvt.account`, walltimes,
+   and list your parameter files under `leap.lib_files` and `leap.frcmod_files`.
+3. Generate all input and job scripts:
 
-   ```
-   python run_upto_NVT.py -c config.ini --submit
+   ```bash
+   python run_upto_NVT.py setup
    ```
 
-   Or run interactively:
+4. Submit:
 
+   ```bash
+   sbatch run_gpu
    ```
-   python run_upto_NVT.py
+
+   Or generate and submit in one step:
+
+   ```bash
+   python run_upto_NVT.py setup --submit
    ```
 
 ## Quick start — local GPU workstation
 
-1. Drop your PDB and parameter files into `00_prep/`.
-2. Edit `00_prep/leap_structure_tmp` as above.
-3. Copy `config.ini.example` -> `config.ini` and set `execution_mode = local`.
-   If AMBER is not on your PATH, also set `amber_home = /path/to/amber24`.
-4. Render the run script (and optionally launch immediately):
+1. Drop your PDB and parameter files (`.lib`, `.frcmod`) into `00_prep/`.
+2. Edit `config.yaml`: set `execution_mode: local`. If AMBER is not on your PATH,
+   also set `amber_home: /path/to/amber24`.
+3. Generate and run:
 
-   ```
-   python run_upto_NVT.py -c config.ini          # generates run_local
-   python run_upto_NVT.py -c config.ini --submit  # generates + launches
-   ```
-
-   Or run interactively:
-
-   ```
-   python run_upto_NVT.py
-   ```
-
-   To launch manually afterwards:
-
-   ```
+   ```bash
+   python run_upto_NVT.py setup
    bash run_local
    ```
 
-## What the driver writes
+   Or generate and launch immediately in the background:
 
-| File | Role |
-|------|------|
-| `00_prep/leap_structure`          | tleap input with the user's PDB filled in |
-| `02_heat/heat_GPU.in`             | dt / nstlim / target temperature patched in place |
-| `04_NVT/prod1.in`                 | dt / nstlim / temperature patched in place |
-| `04_NVT/run_template`             | `__TOPOLOGY__` substituted — cluster NVT worker |
-| `04_NVT/run_local_template`       | `__TOPOLOGY__` substituted — local NVT worker |
-| `run_gpu`  *(cluster mode)*       | Master SLURM submit script (00 -> 04), from `run_gpu_template` |
-| `run_local` *(local mode)*        | Master bash script (00 -> 04), from `run_local_template` |
+   ```bash
+   python run_upto_NVT.py setup --submit
+   ```
 
-## How HMR works in the pipeline
-
-If `use_hmr = yes`:
-
-- `00_prep` runs `cpptraj -i HMR.ccptraj` after `tleap`, producing
-  `structure_HMR.parm7`.
-- All `pmemd.cuda -p` references switch to `structure_HMR.parm7`.
-- All MD timesteps switch to `dt = 0.004`; nstlim values are halved
-  to keep the wall time per stage constant.
-
-If `use_hmr = no`, the original 2 fs timestep with `structure.parm7` is used.
-
-## Single-day vs multi-day cluster
-
-The 04_NVT scheme is the same in either case; only the launcher arguments
-change. They are exposed as `chunks_per_job` and `walltime_nvt` in
-`config.ini`:
-
-| Cluster type | `chunks_per_job` | `walltime_nvt` |
-|--------------|------------------|----------------|
-| 5-day queue  | `total_chunks` (e.g. 5) | `5-00:00:00` |
-| 1-day queue  | 1                       | `1-00:00:00` |
-
-For a 1-day queue the worker self-resubmits the next chunk via `sbatch`
-when its window is finished, so the user only ever submits the first job.
-
-## Local mode — NVT production
-
-In local mode, `04_NVT/script.sh` is called with the `--local` flag.
-It instantiates `04_NVT/run_local_template` into `run_NVT_1_local.sh`
-and runs all chunks sequentially via `bash` (no sbatch, no scheduler).
-If `chunks_per_job < total_chunks`, each worker script chains to the next
-one by calling `bash run_NVT_<n>_local.sh` directly.
-
-Typical local invocation (runs all 5 × 100 ns chunks back-to-back):
+## Commands
 
 ```
-# in config.ini:
-execution_mode  = local
-chunks_per_job  = 5      ; run all 5 chunks in one go
-total_chunks    = 5
+python run_upto_NVT.py setup  [--config config.yaml] [--mode cluster|local] [--submit]
+python run_upto_NVT.py submit [--config config.yaml] [--mode cluster|local]
 ```
+
+- `setup` generates all input files and run scripts. The mode defaults to
+  `execution_mode` in `config.yaml`; pass `--mode` to override.
+- `submit` launches existing scripts without regenerating files — useful after
+  manually editing a generated script.
+- `--submit` on the `setup` command generates files and immediately launches.
+
+## What `setup` writes
+
+| File | Description |
+|------|-------------|
+| `00_prep/leap_structure` | tleap input built from the `leap:` section of `config.yaml` |
+| `00_prep/HMR.ccptraj` | cpptraj input for hydrogen mass repartitioning (only if `use_hmr: true`) |
+| `01_min/min.in` | Minimization input |
+| `02_heat/heat.in` | Heating input (200 ps ramp, 1 K → target temperature) |
+| `03_equil/equil_1.in` … `equil_6.in` | Equilibration inputs (see Simulation stages below) |
+| `04_NVT/prod.in` | Production NVT input |
+| `run_gpu` *(cluster)* | Master SLURM script: runs stages 00–03, then submits `run_NVT_1.cmd` |
+| `04_NVT/run_NVT_N.cmd` *(cluster)* | One SLURM script per chunk-job; each submits the next when done |
+| `run_local` *(local)* | Master bash script: runs stages 00–03, then launches `run_NVT_1_local.sh` |
+| `04_NVT/run_NVT_N_local.sh` *(local)* | One bash script per chunk-job; each launches the next when done |
+
+Stage directories (`01_min/`, `02_heat/`, `03_equil/`, `04_NVT/`) are created
+automatically by `setup` if they do not exist.
+
+All templates are embedded in `run_upto_NVT.py` — no external template files
+are needed.
+
+## Simulation stages
+
+### 00_prep — topology and coordinates
+
+`tleap` reads `leap_structure` (generated from `config.yaml`) to build
+`structure.parm7` and `structure.rst7`. If `use_hmr: true`, `cpptraj` then reads
+`HMR.ccptraj` to produce `structure_HMR.parm7` with hydrogen masses repartitioned.
+
+### 01_min — energy minimization
+
+Minimization runs in a convergence-checked outer loop (up to `min.max_cycles_cap`
+repetitions of `min.maxcyc` steps). After each cycle the RMS gradient is read from
+the output file; the loop stops as soon as it falls below `min.convergence_threshold`
+(default 3 × 10⁻³ kcal/mol/Å). If the threshold is never reached, the loop exits
+after the cap and a warning is printed.
+
+### 02_heat — heating
+
+A single 200 ps `pmemd.cuda` run ramps the temperature from 1 K to the target
+(NMR-style `TEMP0` ramp). The ramp ends at 80% of the total heating steps; the
+remaining 20% hold at the target temperature. Backbone heavy atoms are restrained
+at 20 kcal/mol/Å² throughout.
+
+### 03_equil — equilibration
+
+Six sequential cycles:
+
+| Cycle | Ensemble | Duration | Backbone restraint |
+|-------|----------|----------|--------------------|
+| 1 | NPT | `equil.npt_ns` | 15 kcal/mol/Å² |
+| 2 | NPT | `equil.npt_ns` | 12 kcal/mol/Å² |
+| 3 | NPT | `equil.npt_ns` | 9 kcal/mol/Å² |
+| 4 | NPT | `equil.npt_ns` | 6 kcal/mol/Å² |
+| 5 | NPT | `equil.npt_ns` | 3 kcal/mol/Å² |
+| 6 | NVT | `equil.nvt_ns` | none |
+
+### 04_NVT — production
+
+NVT production runs in chunks of `ns_per_chunk` ns. Each chunk is a separate job
+script. `chunks_per_job` controls how many chunks are batched into a single SLURM
+job (or a single local script invocation):
+
+| Queue type | `chunks_per_job` | `slurm.nvt.time` |
+|------------|-----------------|------------------|
+| 1-day queue | `1` | `1-00:00:00` |
+| 5-day queue | `total_chunks` | `5-00:00:00` |
+
+With `chunks_per_job: 1` (the default), each SLURM job runs one chunk and then
+submits the next via `sbatch`, so only the first job needs to be submitted manually
+(done automatically by `run_gpu`).
+
+## HMR
+
+If `use_hmr: true`:
+
+- `setup` writes `00_prep/HMR.ccptraj`; stage 00 runs `cpptraj -i HMR.ccptraj`
+  after `tleap`, producing `structure_HMR.parm7`.
+- All `pmemd.cuda -p` calls reference `structure_HMR.parm7`.
+- All timesteps switch to `dt = 0.004` ps; `nstlim` values scale accordingly to
+  preserve wall time per stage.
+
+If `use_hmr: false`, a 2 fs timestep with `structure.parm7` is used.
+
+## Configuration reference (`config.yaml`)
+
+```yaml
+pdb: MY_PROTEIN.pdb       # PDB file inside 00_prep/
+use_hmr: true             # true -> 4 fs timestep, structure_HMR.parm7
+temperature: 300.0        # K
+job_name: MY_SIM
+
+ns_per_chunk: 100         # ns per production chunk
+total_chunks: 5           # number of chunks (100 ns × 5 = 500 ns total)
+chunks_per_job: 1         # chunks per SLURM job (1 for 1-day queues)
+
+execution_mode: cluster   # cluster or local (sets the default for --mode)
+
+leap:
+  forcefields:            # source commands in order
+    - leaprc.protein.ff14SB
+    - leaprc.water.tip3p
+    - leaprc.gaff
+  lib_files:              # .lib files in 00_prep/ (loadoff), one per entry
+    - MY_LIG.lib
+  frcmod_files:           # .frcmod files in 00_prep/ (loadamberparams), one per entry
+    - MY_LIG.frcmod
+  ions:                   # addions commands, one per entry
+    - "Na+ 0"
+    - "Cl- 0"
+  box_type: TIP3PBOX
+  box_size: 12            # minimum distance from solute to box edge (Å)
+
+amber:
+  module: apps/amber/24   # cluster only: module name loaded by 'module load'
+
+amber_home: ""            # local only: AMBER install dir (sources amber.sh)
+                          # leave blank if pmemd.cuda is already on PATH
+
+slurm:
+  master:                 # SLURM settings for the master job (stages 00-03)
+    time: "1-00:00:00"
+    ntasks: 1
+    gres: gpu:1
+    partition: gpu
+    account: MY_ACCOUNT
+  nvt:                    # SLURM settings for each NVT chunk job
+    time: "1-00:00:00"
+    ntasks: 1
+    gres: gpu:1
+    partition: gpu
+    account: MY_ACCOUNT
+
+min:
+  maxcyc: 30000           # max steps per minimization cycle
+  ncyc: 500               # steepest-descent steps before switching to CG
+  cut: 10.0               # non-bonded cutoff (Å)
+  max_cycles_cap: 100     # max outer loop iterations
+  convergence_threshold: 3.0e-3   # RMS gradient target (kcal/mol/Å)
+
+heat:
+  ps: 200                 # total heating duration (ps)
+
+equil:
+  npt_ns: 1.25            # duration of each restrained NPT cycle (cycles 1-5)
+  nvt_ns: 5.0             # duration of unrestrained NVT cycle (cycle 6)
+
+prod:
+  ntpr: 10000             # energy log frequency (steps)
+  ntwx: 50000             # trajectory write frequency (steps)
+  ntwr: 10000             # restart write frequency (steps)
+```
+
+## Error handling
+
+All generated bash scripts run with `set -euo pipefail`. Any failed `pmemd.cuda`
+call (bad GPU, bad input, out of memory) immediately halts the job rather than
+continuing and producing empty output files.
