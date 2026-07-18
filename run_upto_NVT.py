@@ -9,6 +9,9 @@ Commands
 
   setup   Generate all input and job scripts.
           Pass --submit to also launch immediately after.
+          Generated scripts auto-resume: each stage checks whether its
+          output files already exist and skips itself if so, making it
+          safe to re-run after a partial or interrupted execution.
   submit  Submit existing scripts without regenerating files.
           Use this after manually editing generated scripts.
 
@@ -47,9 +50,9 @@ Initial minimization
   ntb    = 1,
   ntxo   = 1,
   cut    = {cut},
-  iwrap  = 1
+  iwrap  = 1{nmropt_cntrl}
  /
-"""
+{disang_tail}"""
 
 _HEAT_TEMPLATE = """\
 Stage 2 heating on GPU 1K to {temp0}K
@@ -70,7 +73,7 @@ Stage 2 heating on GPU 1K to {temp0}K
   value1=1.0, value2={temp0}
 /
 &wt type='END'/
-/
+/{disang_tail}
 """
 
 _EQUIL_NPT_TEMPLATE = """\
@@ -86,12 +89,11 @@ equilibration cycle {cycle} (restrained NPT)
   restraintmask='@CA,C,N,O,H&!:WAT',
   restraint_wt={wt:.1f},
   cut=10, gamma_ln=5.0,
-  iwrap=1, ntxo=1,
+  iwrap=1, ntxo=1,{nmropt_cntrl}
  /
 
 &wt type='END'/
-DISANG = restr
-"""
+{disang_tail}"""
 
 _EQUIL_NVT_TEMPLATE = """\
 equilibration cycle 6 (unrestrained NVT)
@@ -103,12 +105,11 @@ equilibration cycle 6 (unrestrained NVT)
   tempi={temp}, temp0={temp},
   ntpr=1000, ntwx=1000,
   cut=10, gamma_ln=5.0,
-  iwrap=1, ntxo=1,
+  iwrap=1, ntxo=1,{nmropt_cntrl}
  /
 
 &wt type='END'/
-DISANG = restr
-"""
+{disang_tail}"""
 
 _PROD_TEMPLATE = """\
 NVT production
@@ -120,9 +121,9 @@ NVT production
   tempi={temp}, temp0={temp},
   ntpr={ntpr}, ntwx={ntwx}, ntwr={ntwr},
   cut=10, gamma_ln=1.0,
-  iwrap=1, ntxo=1,
+  iwrap=1, ntxo=1,{nmropt_cntrl}
  /
-"""
+{disang_tail}"""
 
 
 _HMR_TEMPLATE = """\
@@ -184,83 +185,97 @@ _RUN_BODY_TEMPLATE = """\
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-# ============================================================
-# 00_prep -- topology / coordinates
-# ============================================================
-cd "$DIR/00_prep"
-log "00_prep: tleap"
-tleap -f leap_structure
-__HMR_BLOCK__
+__PREP_BLOCK__
 
 # ============================================================
 # 01_min -- energy minimization with convergence check
 # ============================================================
 cd "$DIR/01_min"
-log "01_min: starting"
-cp "$DIR/00_prep/structure.rst7" structure_min_0.rst7
+log "01_min: checking"
+[[ -f "structure_min_0.rst7" ]] || cp "$DIR/00_prep/structure.rst7" structure_min_0.rst7
 
 max_min_cycles=__MIN_CYCLES_CAP__
 conv_thresh=__CONV_THRESH__
 converged_cycle=0
 
-for ((i=1; i<=${max_min_cycles}; i++)); do
-    log "01_min: cycle ${i}"
-    pmemd.cuda -O -i min.in -o structure_min_${i}.out -p ../00_prep/__TOPOLOGY__ \\
-                            -c structure_min_$((i-1)).rst7 \\
-                            -r structure_min_${i}.rst7 \\
-                            -ref structure_min_$((i-1)).rst7
-
-    min_rms=$(awk '/NSTEP[[:space:]]+ENERGY[[:space:]]+RMS[[:space:]]+GMAX/ {getline; print $3}' \\
-                  structure_min_${i}.out | sort -g | head -n 1)
-    converged=$(awk -v r="${min_rms:-9e99}" -v t="${conv_thresh}" \\
-                'BEGIN {print (r+0 < t+0) ? 1 : 0}')
-    echo "01_min cycle ${i}: RMS=${min_rms} kcal/mol/A  converged=${converged}"
-
-    if [ "${converged}" -eq 1 ]; then
-        log "01_min converged at cycle ${i}"
-        converged_cycle=${i}; break
-    fi
+last_min=0
+for f in structure_min_[0-9]*.rst7; do
+    [[ "$f" == "structure_min_0.rst7" ]] && continue
+    n=${f#structure_min_}; n=${n%.rst7}
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > last_min )) && last_min=$n
 done
 
-if [ "${converged_cycle}" -gt 0 ]; then
-    min_cycles=${converged_cycle}
+if (( last_min > 0 )); then
+    log "01_min: already completed through cycle ${last_min}, skipping"
+    min_cycles=${last_min}
 else
-    log "WARNING: 01_min did not converge in ${max_min_cycles} cycles."
-    min_cycles=${max_min_cycles}
+    for ((i=1; i<=${max_min_cycles}; i++)); do
+        log "01_min: cycle ${i}"
+        pmemd.cuda -O -i min.in -o structure_min_${i}.out -p ../00_prep/__TOPOLOGY__ \\
+                                -c structure_min_$((i-1)).rst7 \\
+                                -r structure_min_${i}.rst7 \\
+                                -ref structure_min_$((i-1)).rst7
+
+        min_rms=$(awk '/NSTEP[[:space:]]+ENERGY[[:space:]]+RMS[[:space:]]+GMAX/ {getline; print $3}' \\
+                      structure_min_${i}.out | sort -g | head -n 1)
+        converged=$(awk -v r="${min_rms:-9e99}" -v t="${conv_thresh}" \\
+                    'BEGIN {print (r+0 < t+0) ? 1 : 0}')
+        echo "01_min cycle ${i}: RMS=${min_rms} kcal/mol/A  converged=${converged}"
+
+        if [ "${converged}" -eq 1 ]; then
+            log "01_min converged at cycle ${i}"
+            converged_cycle=${i}; break
+        fi
+    done
+
+    if [ "${converged_cycle}" -gt 0 ]; then
+        min_cycles=${converged_cycle}
+    else
+        log "WARNING: 01_min did not converge in ${max_min_cycles} cycles."
+        min_cycles=${max_min_cycles}
+    fi
 fi
 
 # ============================================================
 # 02_heat
 # ============================================================
 cd "$DIR/02_heat"
-log "02_heat"
-pmemd.cuda -O -i heat.in -o structure_heat.out -p ../00_prep/__TOPOLOGY__ \\
-                          -c "$DIR/01_min/structure_min_${min_cycles}.rst7" \\
-                          -r structure_heat.rst7 \\
-                          -x structure_heat.nc \\
-                          -ref "$DIR/01_min/structure_min_${min_cycles}.rst7"
+if [[ -f "structure_heat.rst7" ]]; then
+    log "02_heat: already done, skipping"
+else
+    log "02_heat"
+    pmemd.cuda -O -i heat.in -o structure_heat.out -p ../00_prep/__TOPOLOGY__ \\
+                              -c "$DIR/01_min/structure_min_${min_cycles}.rst7" \\
+                              -r structure_heat.rst7 \\
+                              -x structure_heat.nc \\
+                              -ref "$DIR/01_min/structure_min_${min_cycles}.rst7"
+fi
 
 # ============================================================
 # 03_equil -- cycles 1-5 restrained NPT; cycle 6 unrestrained NVT
 # ============================================================
 cd "$DIR/03_equil"
-log "03_equil: starting"
-cp "$DIR/02_heat/structure_heat.rst7" structure_equil_0.rst7
+log "03_equil: checking"
+[[ -f "structure_equil_0.rst7" ]] || cp "$DIR/02_heat/structure_heat.rst7" structure_equil_0.rst7
 
 for ((i=1; i<=6; i++)); do
-    log "03_equil: cycle ${i}/6"
-    pmemd.cuda -O -i equil_${i}.in -o structure_equil_${i}.out -p ../00_prep/__TOPOLOGY__ \\
-                               -c structure_equil_$((i-1)).rst7 \\
-                               -r structure_equil_${i}.rst7 \\
-                               -x structure_equil_${i}.nc \\
-                               -ref structure_equil_$((i-1)).rst7
+    if [[ -f "structure_equil_${i}.rst7" ]]; then
+        log "03_equil: cycle ${i}/6 already done, skipping"
+    else
+        log "03_equil: cycle ${i}/6"
+        pmemd.cuda -O -i equil_${i}.in -o structure_equil_${i}.out -p ../00_prep/__TOPOLOGY__ \\
+                                   -c structure_equil_$((i-1)).rst7 \\
+                                   -r structure_equil_${i}.rst7 \\
+                                   -x structure_equil_${i}.nc \\
+                                   -ref structure_equil_$((i-1)).rst7
+    fi
 done
 
 # ============================================================
 # 04_NVT -- production
 # ============================================================
 cd "$DIR/04_NVT"
-cp "$DIR/03_equil/structure_equil_6.rst7" structure_NVT_0.rst7
+[[ -f "structure_NVT_0.rst7" ]] || cp "$DIR/03_equil/structure_equil_6.rst7" structure_NVT_0.rst7
 __NVT_LAUNCH__
 """
 
@@ -308,13 +323,17 @@ _NVT_JOB_BODY_TEMPLATE = """\
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 for ((i=__START__; i<=__END__; i++)); do
-    log "NVT chunk ${i}/__TOTAL__"
-    pmemd.cuda -O -i prod.in \\
-                  -o structure_NVT_${i}.out \\
-                  -p ../00_prep/__TOPOLOGY__ \\
-                  -c structure_NVT_$((i-1)).rst7 \\
-                  -r structure_NVT_${i}.rst7 \\
-                  -x structure_NVT_${i}.nc
+    if [[ -f "structure_NVT_${i}.rst7" ]]; then
+        log "NVT chunk ${i}/__TOTAL__: already done, skipping"
+    else
+        log "NVT chunk ${i}/__TOTAL__"
+        pmemd.cuda -O -i prod.in \\
+                      -o structure_NVT_${i}.out \\
+                      -p ../00_prep/__TOPOLOGY__ \\
+                      -c structure_NVT_$((i-1)).rst7 \\
+                      -r structure_NVT_${i}.rst7 \\
+                      -x structure_NVT_${i}.nc
+    fi
 done
 __NEXT_JOB__
 """
@@ -326,6 +345,19 @@ __NEXT_JOB__
 
 def _gen_run_script(cfg: dict, topology: str, mode: str) -> str:
     hmr_block = "cpptraj -i HMR.ccptraj" if cfg.get("use_hmr", True) else "# HMR disabled"
+    prep_block = (
+        "# ============================================================\n"
+        "# 00_prep -- topology / coordinates\n"
+        "# ============================================================\n"
+        'if [[ -f "$DIR/00_prep/__TOPOLOGY__" && -f "$DIR/00_prep/structure.rst7" ]]; then\n'
+        '    log "00_prep: already done, skipping"\n'
+        "else\n"
+        '    cd "$DIR/00_prep"\n'
+        '    log "00_prep: tleap"\n'
+        "    tleap -f leap_structure\n"
+        "    __HMR_BLOCK__\n"
+        "fi"
+    )
 
     if mode == "cluster":
         slurm = cfg["slurm"]["master"]
@@ -351,6 +383,7 @@ def _gen_run_script(cfg: dict, topology: str, mode: str) -> str:
 
     body = (
         _RUN_BODY_TEMPLATE
+        .replace("__PREP_BLOCK__", prep_block)
         .replace("__HMR_BLOCK__", hmr_block)
         .replace("__MIN_CYCLES_CAP__", str(cfg["min"]["max_cycles_cap"]))
         .replace("__CONV_THRESH__", str(cfg["min"]["convergence_threshold"]))
@@ -399,17 +432,29 @@ def _gen_nvt_job(job_idx: int, start_chunk: int, end_chunk: int,
 
 def validate_inputs(cfg: dict) -> None:
     prep = REPL_ROOT / "00_prep"
-    pdb = prep / cfg["pdb"]
-    if not pdb.exists():
-        sys.exit(f"ERROR: {pdb} not found.\n"
-                 f"Place the PDB in {prep}/ before running setup.")
-    leap_cfg = cfg.get("leap", {})
-    for f in leap_cfg.get("lib_files", []):
-        if not (prep / f).exists():
-            sys.exit(f"ERROR: lib file '{f}' not found in {prep}/")
-    for f in leap_cfg.get("frcmod_files", []):
-        if not (prep / f).exists():
-            sys.exit(f"ERROR: frcmod file '{f}' not found in {prep}/")
+    use_hmr  = bool(cfg.get("use_hmr", True))
+    topology = "structure_HMR.parm7" if use_hmr else "structure.parm7"
+    prep_done = (prep / topology).exists() and (prep / "structure.rst7").exists()
+
+    if not prep_done:
+        pdb = prep / cfg["pdb"]
+        if not pdb.exists():
+            sys.exit(f"ERROR: {pdb} not found.\n"
+                     f"Place the PDB in {prep}/ before running setup.")
+        leap_cfg = cfg.get("leap", {})
+        for f in leap_cfg.get("lib_files", []):
+            if not (prep / f).exists():
+                sys.exit(f"ERROR: lib file '{f}' not found in {prep}/")
+        for f in leap_cfg.get("frcmod_files", []):
+            if not (prep / f).exists():
+                sys.exit(f"ERROR: frcmod file '{f}' not found in {prep}/")
+    restr_cfg = cfg.get("restraints", {})
+    if bool(restr_cfg.get("enabled", False)):
+        restr_file = restr_cfg.get("file", "").strip()
+        if not restr_file:
+            sys.exit("ERROR: restraints.enabled is true but restraints.file is not set.")
+        if not (REPL_ROOT / restr_file).exists():
+            sys.exit(f"ERROR: restraint file '{restr_file}' not found.")
     if cfg.get("execution_mode", "cluster") == "local":
         amber_home = cfg.get("amber_home", "").strip()
         if not amber_home and not shutil.which("pmemd.cuda"):
@@ -456,12 +501,24 @@ def setup(cfg: dict, mode: str = "cluster", submit: bool = False) -> None:
     topology = "structure_HMR.parm7" if use_hmr else "structure.parm7"
     temp     = float(cfg["temperature"])
 
+    restr_cfg     = cfg.get("restraints", {})
+    restr_enabled = bool(restr_cfg.get("enabled", False))
+    restr_file    = restr_cfg.get("file", "").strip() if restr_enabled else ""
+    restr_rel     = f"../{restr_file}" if restr_enabled else ""
+
+    # Strings injected into each AMBER .in template
+    nmropt_cntrl   = "\n  nmropt = 1," if restr_enabled else ""
+    disang_full    = f"&wt type='END' /\nDISANG = {restr_rel}\n" if restr_enabled else ""
+    disang_heat    = f"\nDISANG = {restr_rel}" if restr_enabled else ""
+    disang_equil   = f"DISANG = {restr_rel}\n" if restr_enabled else ""
+
     validate_inputs(cfg)
 
-    print(f"\nMode     : {mode}")
-    print(f"HMR      : {use_hmr}  (dt={dt} ps, topology={topology})")
-    print(f"Temp     : {temp} K")
-    print(f"Chunks   : {cfg['total_chunks']} × {cfg['ns_per_chunk']} ns")
+    print(f"\nMode       : {mode}")
+    print(f"HMR        : {use_hmr}  (dt={dt} ps, topology={topology})")
+    print(f"Temp       : {temp} K")
+    print(f"Restraints : {'enabled  (' + restr_file + ')' if restr_enabled else 'off'}")
+    print(f"Chunks     : {cfg['total_chunks']} × {cfg['ns_per_chunk']} ns")
     print()
     print("Writing input files ...")
 
@@ -485,6 +542,8 @@ def setup(cfg: dict, mode: str = "cluster", submit: bool = False) -> None:
             maxcyc=min_cfg["maxcyc"],
             ncyc=min_cfg["ncyc"],
             cut=min_cfg["cut"],
+            nmropt_cntrl=nmropt_cntrl,
+            disang_tail=disang_full,
         )
     )
     print("  wrote 01_min/min.in")
@@ -498,6 +557,7 @@ def setup(cfg: dict, mode: str = "cluster", submit: bool = False) -> None:
             nstlim=heat_steps,
             dt=dt,
             ramp_end=ramp_end,
+            disang_tail=disang_heat,
         )
     )
     print("  wrote 02_heat/heat.in")
@@ -511,10 +571,14 @@ def setup(cfg: dict, mode: str = "cluster", submit: bool = False) -> None:
         (equil_dir / f"equil_{cycle}.in").write_text(
             _EQUIL_NPT_TEMPLATE.format(
                 cycle=cycle, nstlim=npt_steps, dt=dt, temp=temp, wt=wt,
+                nmropt_cntrl=nmropt_cntrl, disang_tail=disang_equil,
             )
         )
     (equil_dir / "equil_6.in").write_text(
-        _EQUIL_NVT_TEMPLATE.format(nstlim=nvt_steps, dt=dt, temp=temp)
+        _EQUIL_NVT_TEMPLATE.format(
+            nstlim=nvt_steps, dt=dt, temp=temp,
+            nmropt_cntrl=nmropt_cntrl, disang_tail=disang_equil,
+        )
     )
     print("  wrote 03_equil/equil_{1..6}.in")
 
@@ -527,6 +591,8 @@ def setup(cfg: dict, mode: str = "cluster", submit: bool = False) -> None:
             ntpr=prod_cfg["ntpr"],
             ntwx=prod_cfg["ntwx"],
             ntwr=prod_cfg["ntwr"],
+            nmropt_cntrl=nmropt_cntrl,
+            disang_tail=disang_full,
         )
     )
     print("  wrote 04_NVT/prod.in")

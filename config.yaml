@@ -96,6 +96,15 @@ equil:
   nvt_ns: 5.0               # cycle 6: unrestrained NVT
 
 
+# ---- Restraints (optional) --------------------------------------------------
+# Set enabled to true to apply NMR restraints (DISANG) throughout all stages:
+# minimization, heating, equilibration, and production.
+# file is the path to the restraint file relative to the project root.
+restraints:
+  enabled: false
+  file: ""                    # e.g. 00_prep/my_restraints.rst
+
+
 # ---- Production (per chunk) -------------------------------------------------
 prod:
   ntpr: 10000               # energy print frequency (steps)
