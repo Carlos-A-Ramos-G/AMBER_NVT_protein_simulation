@@ -4,6 +4,10 @@ A self-contained protocol for running classical MD NVT production simulations of
 proteins with AMBER. Edit `config.yaml`, run `python run_upto_NVT.py setup`, and
 submit — all input files and job scripts are generated automatically.
 
+Generated scripts are **resume-safe**: each stage checks whether its output files
+already exist and skips itself if so, making it safe to re-run after a partial or
+interrupted execution without redoing completed work.
+
 Two execution modes are supported:
 
 - **cluster** — generates `run_gpu` (SLURM master script) and one NVT chunk job
@@ -19,7 +23,9 @@ Two execution modes are supported:
   - **local**: either on PATH, or set `amber_home` to your AMBER install directory.
 - Python >= 3.8 with PyYAML (`pip install pyyaml`).
 - A PDB file plus any non-standard residue parameter files (`*.lib`, `*.frcmod`)
-  placed in `00_prep/`.
+  placed in `00_prep/`. These are only required for the first run; if
+  `structure.parm7` (or `structure_HMR.parm7`) and `structure.rst7` already exist
+  in `00_prep/`, `setup` skips the tleap input checks.
 
 ## Quick start — cluster (SLURM)
 
@@ -105,6 +111,9 @@ are needed.
 `structure.parm7` and `structure.rst7`. If `use_hmr: true`, `cpptraj` then reads
 `HMR.ccptraj` to produce `structure_HMR.parm7` with hydrogen masses repartitioned.
 
+**Auto-skip:** if both the topology and `structure.rst7` already exist, this entire
+stage is skipped at runtime.
+
 ### 01_min — energy minimization
 
 Minimization runs in a convergence-checked outer loop (up to `min.max_cycles_cap`
@@ -113,12 +122,17 @@ the output file; the loop stops as soon as it falls below `min.convergence_thres
 (default 3 × 10⁻³ kcal/mol/Å). If the threshold is never reached, the loop exits
 after the cap and a warning is printed.
 
+**Auto-skip:** if any `structure_min_N.rst7` (N ≥ 1) already exists, the loop is
+skipped and the highest-numbered restart file is used for the next stage.
+
 ### 02_heat — heating
 
 A single 200 ps `pmemd.cuda` run ramps the temperature from 1 K to the target
 (NMR-style `TEMP0` ramp). The ramp ends at 80% of the total heating steps; the
 remaining 20% hold at the target temperature. Backbone heavy atoms are restrained
 at 20 kcal/mol/Å² throughout.
+
+**Auto-skip:** if `structure_heat.rst7` already exists, this stage is skipped.
 
 ### 03_equil — equilibration
 
@@ -132,6 +146,9 @@ Six sequential cycles:
 | 4 | NPT | `equil.npt_ns` | 6 kcal/mol/Å² |
 | 5 | NPT | `equil.npt_ns` | 3 kcal/mol/Å² |
 | 6 | NVT | `equil.nvt_ns` | none |
+
+**Auto-skip:** each cycle is skipped individually if its `structure_equil_N.rst7`
+already exists, so a run interrupted mid-equilibration resumes at the failed cycle.
 
 ### 04_NVT — production
 
@@ -147,6 +164,28 @@ job (or a single local script invocation):
 With `chunks_per_job: 1` (the default), each SLURM job runs one chunk and then
 submits the next via `sbatch`, so only the first job needs to be submitted manually
 (done automatically by `run_gpu`).
+
+**Auto-skip:** each chunk is skipped if its `structure_NVT_N.rst7` already exists.
+
+## NMR restraints
+
+Protocol-wide NMR restraints (DISANG format) can be applied to all stages —
+minimization, heating, equilibration, and production — by setting two keys in
+`config.yaml`:
+
+```yaml
+restraints:
+  enabled: true
+  file: 00_prep/my_restraints.rst   # path relative to the project root
+```
+
+When enabled, `setup` injects `nmropt = 1` into every `&cntrl` block and appends
+a `DISANG = ../path/to/file` line to each input file. The path is automatically
+prefixed with `../` since all stage directories sit one level below the project
+root.
+
+The restraint file must exist before running `setup`; validation will exit with an
+error if it is missing.
 
 ## HMR
 
@@ -227,6 +266,11 @@ prod:
   ntpr: 10000             # energy log frequency (steps)
   ntwx: 50000             # trajectory write frequency (steps)
   ntwr: 10000             # restart write frequency (steps)
+
+restraints:
+  enabled: false          # true to apply NMR restraints throughout all stages
+  file: ""                # path to DISANG file, relative to project root
+                          # e.g. 00_prep/my_restraints.rst
 ```
 
 ## Error handling
